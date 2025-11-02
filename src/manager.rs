@@ -2,11 +2,11 @@ use crate::error::{DiakonosError, Result};
 use crate::service::{Service, ServiceState};
 use crate::unit::UnitFile;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 pub struct ServiceManager {
     services: Arc<RwLock<HashMap<String, Service>>>,

@@ -1,6 +1,16 @@
 # Diakonos
 
-A systemd-like service manager written in Rust.
+A PM2-style service manager written in Rust with a persistent daemon architecture.
+
+## Architecture
+
+Diakonos uses a **daemon-client architecture** similar to PM2:
+
+- **Persistent Daemon**: Runs in the background (`~/.diakonos/`)
+- **Thin CLI Client**: Sends commands to daemon via Unix sockets
+- **Process Parenting**: All managed services are children of the daemon, not your terminal
+- **Auto-start**: Daemon starts automatically on first command
+- **Service Persistence**: Services continue running even if the daemon crashes
 
 ## Features
 
@@ -10,6 +20,7 @@ A systemd-like service manager written in Rust.
 - TOML-based unit files
 - Service state monitoring
 - Colored CLI output
+- Daemon management (status, kill)
 
 ## Installation
 
@@ -41,9 +52,14 @@ diakonos restart <service-name>
 # Check service status
 diakonos status <service-name>
 
-# Run in daemon mode with supervision
-diakonos daemon
+# Check daemon status
+diakonos daemon-status
+
+# Kill the daemon (stops all managed services)
+diakonos kill
 ```
+
+**Note**: The daemon starts automatically on the first command, so you don't need to manually start it. Just run any command and the daemon will launch in the background if it's not already running.
 
 ### Custom Service Directory
 
@@ -102,9 +118,9 @@ After = ["database"]
 
 [service]
 Type = "simple"
-ExecStart = "bash -c 'while true; do echo Working...; sleep 5; done'"
+ExecStart = "sleep 10"
 Environment = ["LOG_LEVEL=info", "WORKER_ID=1"]
-Restart = "always"
+Restart = "on-failure"
 RestartSec = 3
 ```
 
@@ -116,9 +132,9 @@ RestartSec = 3
 
 ## Restart Policies
 
-- **always**: Always restart the service when it exits
-- **on-failure**: Restart only if the service exits with a non-zero status
-- **no**: Never restart the service
+- **always**: Always restart the service when it exits (creates a restart loop for services that complete successfully)
+- **on-failure**: Restart only if the service exits with a non-zero status (recommended for most services)
+- **no**: Never restart the service (for one-time tasks)
 
 ## Dependencies
 

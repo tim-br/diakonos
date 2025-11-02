@@ -1,24 +1,32 @@
+mod client;
+mod daemon;
 mod error;
+mod ipc;
 mod manager;
 mod service;
 mod unit;
 
 use clap::{Parser, Subcommand};
-use manager::ServiceManager;
+use client::Client;
+use daemon::{DaemonConfig, ensure_daemon_started, is_daemon_running, start_daemon};
+use ipc::{Request, Response};
 use std::path::PathBuf;
-use tracing::{error, info};
-use tracing_subscriber;
+use tracing::error;
 
 #[derive(Parser)]
 #[command(name = "diakonos")]
-#[command(about = "A systemd-like service manager", long_about = None)]
+#[command(about = "A PM2-like service manager", long_about = None)]
 struct Cli {
     /// Directory containing service unit files
     #[arg(short, long, default_value = "./services")]
     service_dir: PathBuf,
 
+    /// Start in daemon mode (internal use only)
+    #[arg(long, hide = true)]
+    daemon_start: bool,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -45,12 +53,13 @@ enum Commands {
     },
     /// List all services
     List,
-    /// Run the service manager daemon
-    Daemon,
+    /// Show daemon status
+    DaemonStatus,
+    /// Kill the daemon (stops all services)
+    Kill,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_target(false)
@@ -60,77 +69,110 @@ async fn main() {
 
     let cli = Cli::parse();
 
+    let mut config = DaemonConfig::default();
+    config.service_dir = cli.service_dir.clone();
+
     // Create service directory if it doesn't exist
-    if !cli.service_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&cli.service_dir) {
-            error!("Failed to create service directory: {}", e);
+    if !config.service_dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(&config.service_dir) {
+            eprintln!("Failed to create service directory: {}", e);
             std::process::exit(1);
         }
     }
 
-    let manager = ServiceManager::new(cli.service_dir.clone());
+    // Handle daemon start (internal) - use sync code path
+    if cli.daemon_start {
+        if let Err(e) = start_daemon(config) {
+            error!("Failed to start daemon: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
-    // Load all services
-    if let Err(e) = manager.load_all_services().await {
-        error!("Failed to load services: {}", e);
+    // Run client code with tokio runtime
+    run_client(cli, config);
+}
+
+#[tokio::main]
+async fn run_client(cli: Cli, config: DaemonConfig) {
+
+    // Handle commands
+    let command = cli.command.unwrap_or(Commands::List);
+
+    match command {
+        Commands::DaemonStatus => {
+            if is_daemon_running(&config) {
+                println!("✓ Daemon is running");
+                println!("  Socket: {:?}", config.socket_path);
+                println!("  PID file: {:?}", config.pid_file);
+            } else {
+                println!("✗ Daemon is not running");
+            }
+            return;
+        }
+
+        Commands::Kill => {
+            if !is_daemon_running(&config) {
+                println!("Daemon is not running");
+                return;
+            }
+
+            println!("Killing daemon...");
+            let client = Client::new(config);
+
+            match client.send_request(Request::Shutdown).await {
+                Ok(_) => println!("✓ Daemon killed"),
+                Err(e) => {
+                    eprintln!("Failed to kill daemon: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+
+        _ => {}
+    }
+
+    // Ensure daemon is running
+    if let Err(e) = ensure_daemon_started(&config) {
+        eprintln!("Failed to start daemon: {}", e);
         std::process::exit(1);
     }
 
-    match cli.command {
-        Commands::Start { service } => {
-            info!("Starting service: {}", service);
-            match manager.start_service(&service).await {
-                Ok(_) => {
-                    println!("✓ Service '{}' started successfully", service);
-                }
-                Err(e) => {
-                    error!("Failed to start service '{}': {}", service, e);
-                    std::process::exit(1);
-                }
-            }
+    // Create client and send request
+    let client = Client::new(config);
+
+    let request = match command {
+        Commands::Start { service } => Request::Start { service },
+        Commands::Stop { service } => Request::Stop { service },
+        Commands::Restart { service } => Request::Restart { service },
+        Commands::Status { service } => Request::Status { service },
+        Commands::List => Request::List,
+        _ => unreachable!(),
+    };
+
+    match client.send_request(request).await {
+        Ok(response) => handle_response(response),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
         }
+    }
+}
 
-        Commands::Stop { service } => {
-            info!("Stopping service: {}", service);
-            match manager.stop_service(&service).await {
-                Ok(_) => {
-                    println!("✓ Service '{}' stopped successfully", service);
-                }
-                Err(e) => {
-                    error!("Failed to stop service '{}': {}", service, e);
-                    std::process::exit(1);
-                }
-            }
+fn handle_response(response: Response) {
+    match response {
+        Response::Ok { message } => {
+            println!("✓ {}", message);
         }
-
-        Commands::Restart { service } => {
-            info!("Restarting service: {}", service);
-            match manager.restart_service(&service).await {
-                Ok(_) => {
-                    println!("✓ Service '{}' restarted successfully", service);
-                }
-                Err(e) => {
-                    error!("Failed to restart service '{}': {}", service, e);
-                    std::process::exit(1);
-                }
-            }
+        Response::Error { message } => {
+            eprintln!("✗ Error: {}", message);
+            std::process::exit(1);
         }
-
-        Commands::Status { service } => {
-            match manager.get_service_status(&service).await {
-                Ok(state) => {
-                    println!("Service '{}' status: {:?}", service, state);
-                }
-                Err(e) => {
-                    error!("Failed to get status for service '{}': {}", service, e);
-                    std::process::exit(1);
-                }
-            }
+        Response::Status { service, state } => {
+            println!("Service '{}' status: {:?}", service, state);
         }
-
-        Commands::List => {
-            let services = manager.list_services().await;
-
+        Response::List { services } => {
             if services.is_empty() {
                 println!("No services loaded");
             } else {
@@ -150,14 +192,8 @@ async fn main() {
                 }
             }
         }
-
-        Commands::Daemon => {
-            info!("Starting diakonos daemon");
-            println!("Diakonos daemon started. Supervising services...");
-            println!("Press Ctrl+C to stop.");
-
-            // Start supervision loop
-            manager.supervise().await;
+        Response::Pong => {
+            println!("Daemon is alive");
         }
     }
 }
