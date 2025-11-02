@@ -1,0 +1,11 @@
+[unit]
+Description = "Example worker service"
+Requires = ["database"]
+After = ["database"]
+
+[service]
+Type = "simple"
+ExecStart = "bash -c 'while true; do echo Worker running...; sleep 5; done'"
+Environment = ["LOG_LEVEL=info", "WORKER_ID=1"]
+Restart = "always"
+RestartSec = 3

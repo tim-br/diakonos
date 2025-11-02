@@ -1,0 +1,9 @@
+[unit]
+Description = "Example web server"
+After = ["database"]
+
+[service]
+Type = "simple"
+ExecStart = "python3 -m http.server 8080"
+Restart = "always"
+RestartSec = 5

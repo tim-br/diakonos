@@ -1,0 +1,8 @@
+[unit]
+Description = "Example database service"
+
+[service]
+Type = "simple"
+ExecStart = "sleep 3600"
+Restart = "on-failure"
+RestartSec = 10
